@@ -26,7 +26,7 @@ def _get_program_for_timing(lin:Linearizer, allow_test_size=True, max_global_siz
   var_vals = {k:(k.max+k.min)//2 for k in vars_from_ast(lin.ast)}
   try:
     lin.linearize()
-    prg = cast(Compiled, Device[Device.DEFAULT]).to_program(lin)
+    prg = cast(Compiled, Device[Device.DEFAULT]).to_program(lin, skip_runtime=True)
     real_global_size = prg.global_size
     if allow_test_size and prg.global_size and all_int(tuple(prg.global_size)):
       test_global_size = prg.global_size[:]
@@ -45,13 +45,14 @@ def _get_program_for_timing(lin:Linearizer, allow_test_size=True, max_global_siz
     lra = prg.runtime_args.copy()
     if global_size: lra['global_size'], lra['local_size'] = global_size, None
     if local_size: lra['local_size'] = local_size
-    return prg.clprg, var_vals, lra, factor
+    return prg.name, prg.lib, var_vals, lra, factor
   except Exception:
     return None
 
 def _time_program(timing_program, rawbufs, cnt=3, clear_l2=False):
   try:
-    clprg, var_vals, lra, factor = timing_program
+    name, lib, var_vals, lra, factor = timing_program
+    clprg = cast(Compiled, Device[Device.DEFAULT]).runtime(name, lib)
     # TODO: this is copied from prg.__call__
     if lra['global_size'] is not None and lra['local_size'] is None: # type: ignore[arg-type]
       lra['local_size'] = local_size = optimize_local_size(clprg, lra['global_size'], rawbufs)
@@ -120,12 +121,14 @@ def beam_search(lin:Linearizer, rawbufs, amt:int, allow_test_size=True) -> Linea
 
   exiting, st = False, time.perf_counter()
   while not exiting:
-    with Timing("linearize:  ", enabled=DEBUG>=3):
+    with Timing("enumerate:  ", enabled=DEBUG>=3):
       acted_lins = flatten([get_linearizer_actions(lin, include_0=False).values() for lin,_ in beam])
 
+    with Timing("linearize:  ", enabled=DEBUG>=3):
       # linearize all
       for x in acted_lins: x.linearize()
 
+    with Timing("dedup:      ", enabled=DEBUG>=3):
       # dedup with uops
       acted_lins_dedup = []
       for lin in acted_lins:
