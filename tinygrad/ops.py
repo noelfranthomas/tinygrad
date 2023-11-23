@@ -278,7 +278,7 @@ class CompiledASTRunner(ASTRunner):
 
   def build(self, compiler, runtime):
     self.lib = compiler.__wrapped__(self.prg) if getenv("DISABLE_COMPILER_CACHE") else compiler(self.prg)
-    self.clprg = runtime(self.name, self.lib)
+    if runtime: self.clprg = runtime(self.name, self.lib)
     return self
 
   def launch_dims(self, var_vals):
@@ -308,11 +308,11 @@ class Compiled:
     self.batch_executor = BatchExecutor if getenv("JIT") == 2 else batch_executor
     self.method_cache: Dict[LazyOp, CompiledASTRunner] = {}
 
-  def to_program(self, k:Linearizer) -> CompiledASTRunner:
+  def to_program(self, k:Linearizer, skip_runtime=False) -> CompiledASTRunner:
     k.linearize()
     src, runtime_args = self.renderer(k.function_name, k.uops)
     return CompiledASTRunner(k.ast, k.function_name, src, k.global_size, k.local_size,
-                             display_name=k.display_name, runtime_args=runtime_args).build(self.compiler, self.runtime)
+                             display_name=k.display_name, runtime_args=runtime_args).build(self.compiler, None if skip_runtime else self.runtime)
 
   def exec_ast(self, ast:LazyOp, output:LazyBuffer, inputs:Tuple[LazyBuffer, ...], var_vals:Dict[Variable, int], **kwargs):
     # check if we can reuse the output buffer

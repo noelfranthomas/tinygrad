@@ -1,4 +1,4 @@
-from typing import Dict, List, cast, DefaultDict, Optional, Tuple, Callable
+from typing import Dict, List, cast, DefaultDict, Optional, Tuple, Callable, Any
 import itertools, random, math, time
 from tinygrad.lazy import vars_from_ast
 from tinygrad.ops import Device, Compiled, MemBuffer
@@ -21,11 +21,7 @@ actions += [
 ]
 if getenv("NOLOCALS"): actions += [Opt(op=OptOps.NOLOCALS)]
 
-# returns time in seconds
-def time_linearizer(lin:Linearizer, rawbufs:List[RawBuffer], allow_test_size=True, max_global_size=65536, cnt=3, disable_cache=False, clear_l2=False) -> float:
-  key = {"ast": str(lin.ast), "opts": str(lin.applied_opts), "allow_test_size": allow_test_size, "max_global_size": max_global_size, "clear_l2": clear_l2, "device": Device.DEFAULT}
-  if not disable_cache and CACHELEVEL >= 2 and (val:=diskcache_get("time_linearizer", key)) is not None: return min(val)
-
+def _get_program_for_timing(lin:Linearizer, allow_test_size=True, max_global_size=65536):
   # Set the midpoint value value for var_vals to optimize shapes.
   var_vals = {k:(k.max+k.min)//2 for k in vars_from_ast(lin.ast)}
   try:
@@ -44,31 +40,37 @@ def time_linearizer(lin:Linearizer, rawbufs:List[RawBuffer], allow_test_size=Tru
       #print(real_global_size, test_global_size, factor)
     else:
       factor = 1
-
-    # TODO: this is copied from prg.__call__
     global_size, local_size = prg.launch_dims(var_vals)
-    if global_size is not None and local_size is None and all_int(tuple(prg.global_size)): # type: ignore[arg-type]
-      local_size = optimize_local_size(prg.clprg, global_size, rawbufs)
-      global_size = [g//l if g%l == 0 else g/l for g,l in zip(global_size, local_size)]
+    prg.global_size = real_global_size
+    lra = prg.runtime_args.copy()
+    if global_size: lra['global_size'], lra['local_size'] = global_size, None
+    if local_size: lra['local_size'] = local_size
+    return prg.clprg, var_vals, lra, factor
+  except Exception:
+    return None
 
+def _time_program(timing_program, rawbufs, cnt=3, clear_l2=False):
+  try:
+    clprg, var_vals, lra, factor = timing_program
+    # TODO: this is copied from prg.__call__
+    if lra['global_size'] is not None and lra['local_size'] is None: # type: ignore[arg-type]
+      lra['local_size'] = local_size = optimize_local_size(clprg, lra['global_size'], rawbufs)
+      lra['global_size'] = [g//l if g%l == 0 else g/l for g,l in zip(lra['global_size'], local_size)]
     tms = []
     for _ in range(cnt):
       if clear_l2:
-        # TODO: this is too small for many L2 caches
-        with Context(DEBUG=0): Tensor.rand(1024,1024).realize()
-      lra = prg.runtime_args.copy()
-      if global_size: lra['global_size'] = global_size
-      if local_size: lra['local_size'] = local_size
-      tms.append(prg.clprg(*rawbufs, *var_vals.values(), **lra, wait=True)*factor)
-    prg.global_size = real_global_size
+        with Context(DEBUG=0): Tensor.rand(1024,1024).realize() # TODO: this is too small for many L2 caches
+      tms.append(clprg(*rawbufs, *var_vals.values(), **lra, wait=True)*factor)
+    return tms
   except Exception:
-    if DEBUG >= 4:
-      import traceback
-      traceback.print_exc()
-      print("FAILED")
-      print(lin.ast)
-      print(lin.applied_opts)
-    tms = [float('inf')]
+    return [float('inf')]
+
+# returns time in seconds
+def time_linearizer(lin:Linearizer, rawbufs:List[RawBuffer], allow_test_size=True, max_global_size=65536, cnt=3, disable_cache=False, clear_l2=False) -> float:
+  key = {"ast": str(lin.ast), "opts": str(lin.applied_opts), "allow_test_size": allow_test_size, "max_global_size": max_global_size, "clear_l2": clear_l2, "device": Device.DEFAULT}
+  if not disable_cache and CACHELEVEL >= 2 and (val:=diskcache_get("time_linearizer", key)) is not None: return min(val)
+  timing_program = _get_program_for_timing(lin, allow_test_size, max_global_size)
+  tms = _time_program(timing_program, rawbufs, cnt, clear_l2)
   if CACHELEVEL >= 2: diskcache_put("time_linearizer", key, tms)
   return min(tms)
 
@@ -133,8 +135,10 @@ def beam_search(lin:Linearizer, rawbufs, amt:int, allow_test_size=True) -> Linea
         acted_lins_dedup.append(lin)
 
     with Timing("compile:    ",enabled=DEBUG>=3):
-      # time linearizers
-      timed_lins: List[Tuple[Linearizer, float]] = [(v,time_linearizer(v,rawbufs,allow_test_size=allow_test_size)) for v in acted_lins_dedup]
+      compiled_lins: List[Tuple[Linearizer, Any]] = [(v,_get_program_for_timing(v, allow_test_size=allow_test_size)) for v in acted_lins_dedup]
+
+    with Timing("timing:     ",enabled=DEBUG>=3):
+      timed_lins: List[Tuple[Linearizer, float]] = [(v,min(_time_program(c, rawbufs))) for v,c in compiled_lins]
       opts = sorted(timed_lins, key=lambda x: x[1])
 
     # done
