@@ -77,14 +77,15 @@ class Transformer:
     if not hasattr(self, 'allpos'): self.allpos = Tensor.arange(0, MAX_CONTEXT).reshape(1, -1).realize()
     _bsz, seqlen = tokens.shape
 
-    tok_emb = self.wte(tokens)
+    tok_emb = self.wte(tokens)   # wte is slow (pad should improve, but can be fixed)
     pos_emb = self.wpe(self.allpos.shrink((None, (start_pos, start_pos+seqlen))))
     h = tok_emb + pos_emb
 
     mask = Tensor.full((1, 1, seqlen, start_pos.val+seqlen), float("-inf")).triu(start_pos.val+1).realize() if seqlen > 1 else None
     for hi in self.h: h = hi(h, start_pos=start_pos, mask=mask)
 
-    logits = self.lm_head(self.ln_f(h))
+    # batch_size x tokens(2432) x dim(1024) x VOCAB_SIZE(50257)
+    logits = self.lm_head(self.ln_f(h))  # lm_head is slow (pad should fix)
     return (logits[:, -1, :] / (temperature+1e-10)).softmax().realize()
 
   # TODO: fix empty token
